@@ -1,0 +1,13 @@
+__pycache__/
+.venv/
+env/
+*.pyc
+*.pkl
+*.pt
+.DS_Store
+.env
+hf_token
+/.hf/
+/.cache/
+/.pytest_cache/
+*.csv
