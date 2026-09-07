@@ -5,20 +5,7 @@ import os
 from typing import List, Dict, Optional
 
 import gradio as gr
-
-# Lazy import of transformers to avoid downloading model at import-time (helps CI verify)
-_sentiment_pipeline = None
-
-
-def get_pipeline():
-    global _sentiment_pipeline
-    if _sentiment_pipeline is None:
-        from transformers import pipeline
-        _sentiment_pipeline = pipeline(
-            "sentiment-analysis",
-            model="distilbert-base-uncased-finetuned-sst-2-english",
-        )
-    return _sentiment_pipeline
+from textblob import TextBlob
 
 
 # In-memory event log for this server process
@@ -34,20 +21,50 @@ def analyze_text(text: str, threshold: float):
             "alert": False,
             "message": "Please enter some text to analyze.",
             "log": EVENT_LOG,
+            "error": None,
         }
 
-    pipe = get_pipeline()
-    # keep input short to avoid edge cases
-    result = pipe(text[:1024])[0]
-    label = result.get("label", "")
-    score = float(result.get("score", 0.0))
-    ts = datetime.utcnow().isoformat() + "Z"
-    entry = {"timestamp": ts, "text": text, "label": label, "score": score}
-    EVENT_LOG.append(entry)
+    try:
+        # Use TextBlob for sentiment analysis
+        blob = TextBlob(text)
+        polarity = blob.sentiment.polarity  # -1 (negative) to 1 (positive)
+        
+        # Convert to 0-1 scale
+        score = (polarity + 1) / 2  # 0-1 scale
+        
+        # Determine label
+        if polarity > 0.1:
+            label = "POSITIVE"
+        elif polarity < -0.1:
+            label = "NEGATIVE"
+        else:
+            label = "NEUTRAL"
+        
+        ts = datetime.utcnow().isoformat() + "Z"
+        entry = {"timestamp": ts, "text": text, "label": label, "score": score}
+        EVENT_LOG.append(entry)
 
-    alert = score >= threshold
-    message = f"{label} ({score:.2f})"
-    return {"label": label, "score": score, "alert": alert, "message": message, "log": EVENT_LOG}
+        alert = score >= threshold
+        message = f"{label} ({score:.2f})"
+        
+        return {
+            "label": label,
+            "score": score,
+            "alert": alert,
+            "message": message,
+            "log": EVENT_LOG,
+            "error": None,
+        }
+    except Exception as e:
+        error_msg = str(e)
+        return {
+            "label": "",
+            "score": 0.0,
+            "alert": False,
+            "message": "",
+            "log": EVENT_LOG,
+            "error": error_msg,
+        }
 
 
 def export_log_csv() -> Optional[str]:
@@ -65,7 +82,7 @@ def export_log_csv() -> Optional[str]:
 
 def create_app() -> gr.Blocks:
     with gr.Blocks() as demo:
-        gr.Markdown("# Live Sentiment Demo\n\nType text and see sentiment label + confidence score.\nThis runs a small Hugging Face transformer model server-side.")
+        gr.Markdown("# Live Sentiment Demo\n\nType text and see sentiment label + confidence score.\nUses TextBlob for fast, lightweight sentiment analysis (no model downloads needed).")
 
         with gr.Row():
             with gr.Column(scale=2):
@@ -83,16 +100,24 @@ def create_app() -> gr.Blocks:
             """
 **How it works**
 
-- Input text is sent to a server-side Hugging Face `transformers` pipeline (`distilbert-base-uncased-finetuned-sst-2-english`).
-- The model returns a label and a confidence score. Entries are appended to a session event log with timestamps.
-- If the model score exceeds the alert threshold, the UI marks the result as an alert.
+- Input text is analyzed using **TextBlob**, a lightweight sentiment analysis library.
+- Analyzes polarity: negative (-1 to 0), neutral (~0), positive (0 to 1).
+- Scores are normalized to 0-1 scale with labels: NEGATIVE, NEUTRAL, or POSITIVE.
+- Entries are appended to a session event log with timestamps.
+- If the score exceeds the alert threshold, the UI marks the result as an alert.
 
-Limitations: The model is small and trained on short movie-review style sentences; results may be noisy on domain-specific text or very short messages.
+Benefits: Fast, no model downloads, no internet dependency, works offline.
 """
         )
 
         def _analyze(text, thr):
             res = analyze_text(text, thr)
+            
+            # If there's an error, display it prominently
+            if res.get("error"):
+                md = f"<span style='color:red;font-weight:700'>❌ ERROR</span><br/>{res['error']}"
+                return md, []
+            
             md = f"**Result:** {res['message']}"
             if res["alert"]:
                 md = f"<span style='color:red;font-weight:700'>ALERT</span> — {md}"
